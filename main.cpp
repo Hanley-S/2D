@@ -1,84 +1,138 @@
-#include <iostream>
 #include <opencv2/opencv.hpp>
+#include <iostream>
 #include <vector>
-#include <cmath>
 
-using namespace std;
 using namespace cv;
-
-int main(int argc, char** argv)
-{
-    // ----------------------读取图片---------------------------
-    cv::Mat src = cv::imread("../img.png");
-    if (src.empty())
-    {
-        cout << "error:unable to load image" << endl;
-        return -1;
-    }
-//    cv::namedWindow("input_image", cv::WINDOW_AUTOSIZE);
-//    imshow("input image", src);
+using namespace std;
 
 
-    // ---------------------转灰度图----------------------------
-    cv::Mat grayImg;
-    cv::cvtColor(src, grayImg, cv::COLOR_BGR2GRAY);
-    imshow("input",grayImg);
+Mat rotateImage(const Mat& src, double angle) {
+    Mat dst;
+    Point2f center(src.cols / 2.0, src.rows / 2.0);       //photo center
+    Mat rot = getRotationMatrix2D(center, angle, 1.0);      //Get rotation matrix
+    /* 计算旋转后的图像边界框
+     * RotatedRect参数：中心点，原图尺寸，旋转角度
+     * boundingRect2f()获取旋转后的矩形包围盒 */
+    Rect2f bbox = RotatedRect(center, src.size(), angle).boundingRect2f();  // 计算旋转后的边界框
+    rot.at<double>(0, 2) += bbox.width / 2.0 - center.x;  // 调整旋转矩阵
+    rot.at<double>(1, 2) += bbox.height / 2.0 - center.y;  // 调整旋转矩阵
 
-    //---------------------滤波去噪点----------------------------
-//    cv::Mat blurImage;
-////    cv::GaussianBlur(grayImg, blurImage, size(9,9), 2,2);     //高斯滤波
-//      medianBlur(grayImg, blurImage, 7);              // 中值滤波
-////     cv::blur(grayImg, blurImage, size(10,10));       // 均值滤波
-//    imshow("模糊滤波", blurImage);
+    warpAffine(src, dst, rot, bbox.size());  // 执行旋转
+    return dst;
+}
 
+// 函数：校正条形码方向
+Mat correctBarcodeOrientation(const Mat& barcode) {
+    Mat gray;
+    cvtColor(barcode, gray, COLOR_BGR2GRAY);  // 转换为灰度图像
 
-    vector<cv::Vec3f>circles;
-    int hough_value = 23;        // Hough变换的累加器阈值，用于检测圆的灵敏度
+    // 二值化
+    Mat thresh;
+    threshold(gray, thresh, 128, 255, THRESH_BINARY);
 
-    // --------------------霍夫圆检测---------------------------
-    cv::HoughCircles(grayImg, circles, cv::HOUGH_GRADIENT, 1, 25, 400, hough_value, 30, 42);
-    cv::Mat houghcircle = src.clone();
+    // 查找轮廓
+    vector<vector<Point>> contours;
+    findContours(thresh, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
-    for (int i = 0; i < circles.size(); ++i)
-    {
-        //绘制圆圈
-        circle(houghcircle, cv::Point(circles[i][0], circles[i][1]), circles[i][2], cv::Scalar(0, 0, 255), 2);
-        //绘制圆心
-        circle(houghcircle,cv::Point(circles[i][0], circles[i][1]),
-               3,
-               cv::Scalar(0, 255, 0),
-               -1,
-               cv::LINE_AA);
-        //显示圆心坐标
-        std::string coord_text = "(" + std::to_string(int (circles[i][0])) + "," + std::to_string(int (circles[i][1])) + ")";
-        cv::putText(houghcircle, coord_text,cv::Point(circles[i][0]+10,circles[i][1]-10),
-                    cv::FONT_HERSHEY_SIMPLEX,0.5,cv::Scalar(255,255,255),1);
-    }
-
-    std::vector<cv::Point> centers;
-    for (int i = 0; i < circles.size(); ++i) {
-        centers.emplace_back(cvRound(circles[i][0]), cvRound(circles[i][1]));
-    }
-
-    for (size_t i = 0; i < centers.size(); ++i) {
-        for (size_t j = i+1; j < centers.size(); ++j) {
-            // 计算欧氏距离
-            double dx = centers[j].x - centers[i].x;
-            double dy = centers[j].y - centers[i].y;
-            double distance = std::sqrt(dx*dx + dy*dy);
-
-            cv::line(houghcircle, centers[i], centers[j], cv::Scalar(255,0,0), 2);
-
-            cv::Point midPt((centers[i].x + centers[j].x)/2, (centers[i].y + centers[j].y)/2);
-            std::string distText = cv::format("%.2f px", distance);
-            cv::putText(houghcircle, distText, midPt + cv::Point(0,-10),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,255), 2);
+    //
+    vector<Point> maxContour;
+    double maxArea = 0;
+    for (const auto& contour : contours) {
+        double area = contourArea(contour);
+        if (area > maxArea) {
+            maxArea = area;
+            maxContour = contour;
         }
     }
 
-    imwrite("houghcircle.jpg", houghcircle);
-    imshow("houghcircle", houghcircle);
-    cv::waitKey(0);
-    return 0;
+    //
+    RotatedRect minRect = minAreaRect(maxContour);
+
+    //
+    double angle = minRect.angle;
+    if (angle < -45) angle += 90;  // 校正角度
+
+    //
+    Mat corrected;
+    Point2f center(barcode.cols / 2.0, barcode.rows / 2.0);
+    Mat rot = getRotationMatrix2D(center, angle, 1.0);
+    warpAffine(barcode, corrected, rot, barcode.size());
+
+    return corrected;
 }
 
+void detectAndCropBarcode(const Mat& src) {
+    Mat gray;
+    cvtColor(src, gray, COLOR_BGR2GRAY);  // 转换为灰度图像
+
+    // 使用 Sobel 算子计算梯度
+    Mat gradX, gradY;
+    Sobel(gray, gradX, CV_32F, 1, 0, -1);
+    Sobel(gray, gradY, CV_32F, 0, 1, -1);
+
+    // 计算梯度幅值和方向
+    Mat gradient;
+    subtract(gradX, gradY, gradient);
+    convertScaleAbs(gradient, gradient);
+
+    // 高斯模糊
+    GaussianBlur(gradient, gradient, Size(9, 9), 2, 2);
+//    imshow("gradient", gradient);
+
+    //binaryzation
+    Mat thresh;
+    threshold(gradient, thresh, 225, 255, THRESH_BINARY);
+
+    //Morphological operation (closed operation)
+    Mat kernel = getStructuringElement(MORPH_RECT, Size(21, 7));
+    morphologyEx(thresh, thresh, MORPH_CLOSE, kernel);
+
+    // 查找轮廓
+    vector<vector<Point>> contours;
+    findContours(thresh, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+    // 调试输出
+    cout << "=== Detection Results ===" << endl;
+    cout << "Total contours: " << contours.size() << endl;
+    int validCount = 0;
+
+    // 遍历轮廓
+    for (size_t i = 0; i < contours.size(); i++) {
+        // 计算轮廓的边界框
+        Rect rect = boundingRect(contours[i]);
+
+        // 过滤掉太小的区域
+        if (rect.width < 100 || rect.height < 50) continue;
+
+        // 绘制边界框
+        rectangle(src, rect, Scalar(0, 255, 0), 2);
+
+        Mat barcode = src(rect);
+
+        imshow("Barcode", barcode);
+        imwrite("barcode_cropped.jpg", barcode);
+    }
+}
+
+int main() {
+    // 读取图像
+    Mat src = imread("../img.png");
+    if (src.empty()) {
+        cout << "Error: Unable to load image!" << endl;
+        return -1;
+    }
+
+    // 旋转图像并检测条形码
+    for (double angle = -30; angle <= 30; angle += 10) {
+        Mat rotated = rotateImage(src, angle);  // 旋转图像
+        detectAndCropBarcode(rotated);  // 检测条形码
+//        imshow("Rotation Angle:" + to_string(angle),rotated);
+//        waitKey(500);
+    }
+
+    // 显示原始图像
+    imshow("Original Image", src);
+    waitKey(0);
+
+    return 0;
+}
