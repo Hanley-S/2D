@@ -10,6 +10,7 @@ include_directories("E:/opencv/opencv/build/include/opencv2")
 #库目录
 link_directories("E:/opencv/opencv/build/x64/vc14/lib")
 #生成可执行文件
-add_executable(txma main.cpp)
+add_executable(txma main.cpp
+        Barcode.cpp)
 #链接静态库
 target_link_libraries(txma opencv_world453d.lib)
